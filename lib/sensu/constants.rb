@@ -1,12 +1,6 @@
 module Sensu
   unless defined?(Sensu::VERSION)
-    VERSION = '0.12.5'
-
-    LOG_LEVELS = [:debug, :info, :warn, :error, :fatal]
-
-    SETTINGS_CATEGORIES = [:checks, :filters, :mutators, :handlers]
-
-    EXTENSION_CATEGORIES = [:profilers, :checks, :mutators, :handlers]
+    VERSION = '0.13.0'
 
     SEVERITIES = %w[ok warning critical unknown]
 

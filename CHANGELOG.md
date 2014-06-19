@@ -1,3 +1,60 @@
+## 0.13.0 - 2014-06-12
+
+### Non-backwards compatible changes
+
+API GET /events now provides all event data, the same data passed to event
+handlers.
+
+AMQP handler type ("amqp") has been replaced by "transport".
+
+Standalone check results are no longer merged with check definitions
+residing on the server(s).
+
+Removed the generic extension type.
+
+Extension stop() no longer takes a callback, and is called when the
+eventmachine reactor is stopped.
+
+### Features
+
+Abstracted the transport layer, opening Sensu up to alternative messaging
+services.
+
+Event bridge extension type, allowing all events to be relayed to other
+services.
+
+Client keepalives now contain the Sensu version.
+
+Support for nested handler sets (not deep).
+
+Setting validation reports all invalid definitions before Sensu exits.
+
+### Other
+
+Clients now only load instances of check extensions, and servers load
+everything but check extensions.
+
+Fixed standalone check scheduling, no longer mutating definitions.
+
+Fixed command token substitution, allowing for the use of colons and
+working value defaults.
+
+Log events are flushed when the eventmachine reactor stops.
+
+Dropped the Oj JSON parser, heap allocation issues and memory leaks.
+
+Client RabbitMQ queues are no longer server named (bugs), they are now
+composed of the client name, Sensu version, and the timestamp at creation.
+
+Server master election lock updates and queries are more frequent.
+
+## 0.12.6 - 2014-02-19
+
+### Non-backwards compatible changes
+
+The "profiler" extension type `Sensu::Extension::Profiler` is now "generic"
+`Sensu::Extension::Generic`.
+
 ## 0.12.5 - 2014-01-20
 
 ### Other

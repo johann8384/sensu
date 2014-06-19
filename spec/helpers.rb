@@ -1,5 +1,6 @@
 require 'rspec'
 require 'eventmachine'
+require 'em-http-request'
 
 module Helpers
   def setup_options
@@ -108,7 +109,7 @@ module Helpers
 
   def check_template
     {
-      :name => 'foobar',
+      :name => 'test',
       :command => 'echo WARNING && exit 1',
       :issued => epoch
     }
@@ -132,6 +133,7 @@ module Helpers
     check[:status] = 1
     check[:history] = [1]
     {
+      :id => UUIDTools::UUID.random_create.to_s,
       :client => client,
       :check => check,
       :occurrences => 1,
@@ -150,7 +152,7 @@ module Helpers
     }
     request_options = default_options.merge(options)
     if request_options[:body].is_a?(Hash) || request_options[:body].is_a?(Array)
-      request_options[:body] = Oj.dump(request_options[:body])
+      request_options[:body] = MultiJson.dump(request_options[:body])
     end
     http = EM::HttpRequest.new('http://localhost:4567' + uri).send(method, request_options)
     http.callback do
@@ -158,7 +160,7 @@ module Helpers
       when http.response.empty?
         http.response
       else
-        Oj.load(http.response)
+        MultiJson.load(http.response)
       end
       block.call(http, body)
     end
@@ -170,7 +172,7 @@ module Helpers
     attr_accessor :expected
 
     def receive_data(data)
-      data.should eq(expected)
+      expect(MultiJson.load(data)).to eq(MultiJson.load(expected))
       EM::stop_event_loop
     end
   end

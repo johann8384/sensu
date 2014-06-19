@@ -1,3 +1,7 @@
+gem 'uuidtools', '2.1.4'
+
+require 'uuidtools'
+
 module Sensu
   module Utilities
     def testing?
@@ -8,23 +12,6 @@ module Sensu
       EM::Timer.new(wait) do
         unless block.call
           retry_until_true(wait, &block)
-        end
-      end
-    end
-
-    def indifferent_hash
-      Hash.new do |hash, key|
-        if key.is_a?(String)
-          hash[key.to_sym]
-        end
-      end
-    end
-
-    def with_indifferent_access(hash)
-      hash = indifferent_hash.merge(hash)
-      hash.each do |key, value|
-        if value.is_a?(Hash)
-          hash[key] = with_indifferent_access(value)
         end
       end
     end
@@ -44,18 +31,8 @@ module Sensu
       merged
     end
 
-    def deep_diff(hash_one, hash_two)
-      keys = hash_one.keys.concat(hash_two.keys).uniq
-      keys.inject(Hash.new) do |diff, key|
-        unless hash_one[key] == hash_two[key]
-          if hash_one[key].is_a?(Hash) && hash_two[key].is_a?(Hash)
-            diff[key] = deep_diff(hash_one[key], hash_two[key])
-          else
-            diff[key] = [hash_one[key], hash_two[key]]
-          end
-        end
-        diff
-      end
+    def random_uuid
+      UUIDTools::UUID.random_create.to_s
     end
 
     def redact_sensitive(hash, keys=nil)

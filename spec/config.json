@@ -37,6 +37,12 @@
         "debug"
       ]
     },
+    "keepalive": {
+      "type": "set",
+      "handlers": [
+        "debug"
+      ]
+    },
     "file": {
       "type": "pipe",
       "command": "cat > /tmp/sensu_event"
@@ -73,11 +79,34 @@
         "port": 1234
       }
     },
-    "amqp": {
-      "type": "amqp",
-      "exchange": {
+    "transport": {
+      "type": "transport",
+      "pipe": {
+        "type": "direct",
         "name": "events"
       }
+    },
+    "nested_set_one": {
+        "type": "set",
+        "handlers": [
+            "nested_set_two"
+        ]
+    },
+    "nested_set_two": {
+        "type": "set",
+        "handlers": [
+            "debug",
+            "file",
+            "nested_set_three"
+        ]
+    },
+    "nested_set_three": {
+        "type": "set",
+        "handlers": [
+            "udp",
+            "tcp",
+            "transport"
+        ]
     }
   },
   "checks": {
@@ -109,16 +138,19 @@
     "subscriptions": [
       "test"
     ],
+    "keepalive": {
+      "thresholds": {
+        "warning": 10
+      }
+    },
+    "version": "TOBEREPLACED",
     "nested": {
       "attribute": true
     },
     "service": {
       "password": "secret"
     },
-    "keepalive": {
-      "thresholds": {
-        "warning": 10
-      }
-    }
+    "empty": {},
+    "localhost": "fail"
   }
 }

@@ -1,9 +1,9 @@
-require File.join(File.dirname(__FILE__), 'base')
-require File.join(File.dirname(__FILE__), 'socket')
+require 'sensu/daemon'
+require 'sensu/socket'
 
 module Sensu
   class Client
-    include Utilities
+    include Daemon
 
     attr_accessor :safe_mode
 
@@ -11,63 +11,40 @@ module Sensu
       client = self.new(options)
       EM::run do
         client.start
-        client.trap_signals
+        client.setup_signal_traps
       end
     end
 
     def initialize(options={})
-      base = Base.new(options)
-      @logger = base.logger
-      @settings = base.settings
-      @extensions = base.extensions
-      base.setup_process
-      @extensions.load_settings(@settings.to_hash)
-      @timers = Array.new
-      @checks_in_progress = Array.new
+      super
       @safe_mode = @settings[:client][:safe_mode] || false
-    end
-
-    def setup_rabbitmq
-      @logger.debug('connecting to rabbitmq', {
-        :settings => @settings[:rabbitmq]
-      })
-      @rabbitmq = RabbitMQ.connect(@settings[:rabbitmq])
-      @rabbitmq.on_error do |error|
-        @logger.fatal('rabbitmq connection error', {
-          :error => error.to_s
-        })
-        stop
-      end
-      @rabbitmq.before_reconnect do
-        @logger.warn('reconnecting to rabbitmq')
-      end
-      @rabbitmq.after_reconnect do
-        @logger.info('reconnected to rabbitmq')
-      end
-      @amq = @rabbitmq.channel
+      @checks_in_progress = Array.new
     end
 
     def publish_keepalive
-      keepalive = @settings[:client].merge(:timestamp => Time.now.to_i)
+      keepalive = @settings[:client].merge({
+        :version => VERSION,
+        :timestamp => Time.now.to_i
+      })
       payload = redact_sensitive(keepalive, @settings[:client][:redact])
       @logger.debug('publishing keepalive', {
         :payload => payload
       })
-      begin
-        @amq.direct('keepalives').publish(Oj.dump(payload))
-      rescue AMQ::Client::ConnectionClosedError => error
-        @logger.error('failed to publish keepalive', {
-          :payload => payload,
-          :error => error.to_s
-        })
+      @transport.publish(:direct, 'keepalives', MultiJson.dump(payload)) do |info|
+        if info[:error]
+          @logger.error('failed to publish keepalive', {
+            :payload => payload,
+            :error => info[:error].to_s
+          })
+        end
       end
     end
 
     def setup_keepalives
       @logger.debug('scheduling keepalives')
       publish_keepalive
-      @timers << EM::PeriodicTimer.new(20) do
-        if @rabbitmq.connected?
+      @timers[:run] << EM::PeriodicTimer.new(20) do
+        unless @state == :paused
           publish_keepalive
         end
       end
@@ -81,27 +58,30 @@ module Sensu
       @logger.info('publishing check result', {
         :payload => payload
       })
-      begin
-        @amq.direct('results').publish(Oj.dump(payload))
-      rescue AMQ::Client::ConnectionClosedError => error
-        @logger.error('failed to publish check result', {
-          :payload => payload,
-          :error => error.to_s
-        })
+      @transport.publish(:direct, 'results', MultiJson.dump(payload)) do |info|
+        if info[:error]
+          @logger.error('failed to publish check result', {
+            :payload => payload,
+            :error => info[:error].to_s
+          })
+        end
+      end
+    end
+
+    def find_client_attribute(tree, path, default)
+      attribute = tree[path.shift]
+      if attribute.is_a?(Hash)
+        find_client_attribute(attribute, path, default)
+      else
+        attribute.nil? ? default : attribute
       end
     end
 
     def substitute_command_tokens(check)
       unmatched_tokens = Array.new
-      substituted = check[:command].gsub(/:::(.*?):::/) do
+      substituted = check[:command].gsub(/:::([^:].*?):::/) do
         token, default = $1.to_s.split('|', -1)
-        matched = token.split('.').inject(@settings[:client]) do |client, attribute|
-          if client[attribute].nil?
-            default.nil? ? break : default
-          else
-            client[attribute]
-          end
-        end
+        matched = find_client_attribute(@settings[:client], token.split('.'), default)
         if matched.nil?
           unmatched_tokens << token
         end
@@ -117,27 +97,16 @@ module Sensu
       unless @checks_in_progress.include?(check[:name])
         @checks_in_progress << check[:name]
         command, unmatched_tokens = substitute_command_tokens(check)
-        check[:executed] = Time.now.to_i
         if unmatched_tokens.empty?
-          execute = Proc.new do
-            @logger.debug('executing check command', {
-              :check => check
-            })
-            started = Time.now.to_f
-            begin
-              check[:output], check[:status] = IO.popen(command, 'r', check[:timeout])
-            rescue => error
-              check[:output] = 'Unexpected error: ' + error.to_s
-              check[:status] = 2
-            end
+          check[:executed] = Time.now.to_i
+          started = Time.now.to_f
+          Spawn.process(command, :timeout => check[:timeout]) do |output, status|
             check[:duration] = ('%.3f' % (Time.now.to_f - started)).to_f
-            check
-          end
-          publish = Proc.new do |check|
+            check[:output] = output
+            check[:status] = status
             publish_result(check)
             @checks_in_progress.delete(check[:name])
           end
-          EM::defer(execute, publish)
         else
           check[:output] = 'Unmatched command tokens: ' + unmatched_tokens.join(', ')
           check[:status] = 3
@@ -195,16 +164,13 @@ module Sensu
 
     def setup_subscriptions
       @logger.debug('subscribing to client subscriptions')
-      @check_request_queue = @amq.queue('', :auto_delete => true) do |queue|
-        @settings[:client][:subscriptions].each do |exchange_name|
-          @logger.debug('binding queue to exchange', {
-            :queue_name => queue.name,
-            :exchange_name => exchange_name
-          })
-          queue.bind(@amq.fanout(exchange_name))
-        end
-        queue.subscribe do |payload|
-          check = Oj.load(payload)
+      @settings[:client][:subscriptions].each do |subscription|
+        @logger.debug('subscribing to a subscription', {
+          :subscription => subscription
+        })
+        funnel = [@settings[:client][:name], VERSION, Time.now.to_i].join('-')
+        @transport.subscribe(:fanout, subscription, funnel) do |message_info, message|
+          check = MultiJson.load(message)
           @logger.info('received check request', {
             :check => check
           })
@@ -219,12 +185,12 @@ module Sensu
       checks.each do |check|
         check_count += 1
         scheduling_delay = stagger * check_count % 30
-        @timers << EM::Timer.new(scheduling_delay) do
+        @timers[:run] << EM::Timer.new(scheduling_delay) do
           interval = testing? ? 0.5 : check[:interval]
-          @timers << EM::PeriodicTimer.new(interval) do
-            if @rabbitmq.connected?
+          @timers[:run] << EM::PeriodicTimer.new(interval) do
+            unless @state == :paused
               check[:issued] = Time.now.to_i
-              process_check(check)
+              process_check(check.dup)
             end
           end
         end
@@ -252,24 +218,13 @@ module Sensu
       EM::start_server(options[:bind], options[:port], Socket) do |socket|
         socket.logger = @logger
         socket.settings = @settings
-        socket.amq = @amq
+        socket.transport = @transport
       end
       EM::open_datagram_socket(options[:bind], options[:port], Socket) do |socket|
         socket.logger = @logger
         socket.settings = @settings
-        socket.amq = @amq
+        socket.transport = @transport
         socket.reply = false
-      end
-    end
-
-    def unsubscribe
-      @logger.warn('unsubscribing from client subscriptions')
-      if @rabbitmq.connected?
-        @check_request_queue.unsubscribe
-      else
-        @check_request_queue.before_recovery do
-          @check_request_queue.unsubscribe
-        end
       end
     end
 
@@ -286,43 +241,23 @@ module Sensu
     end
 
     def start
-      setup_rabbitmq
+      setup_transport
       setup_keepalives
       setup_subscriptions
       setup_standalone
       setup_sockets
+      super
     end
 
     def stop
       @logger.warn('stopping')
-      @timers.each do |timer|
+      @timers[:run].each do |timer|
         timer.cancel
       end
-      unsubscribe
+      @transport.unsubscribe
       complete_checks_in_progress do
-        @extensions.stop_all do
-          @rabbitmq.close
-          @logger.warn('stopping reactor')
-          EM::stop_event_loop
-        end
-      end
-    end
-
-    def trap_signals
-      @signals = Array.new
-      STOP_SIGNALS.each do |signal|
-        Signal.trap(signal) do
-          @signals << signal
-        end
-      end
-      EM::PeriodicTimer.new(1) do
-        signal = @signals.shift
-        if STOP_SIGNALS.include?(signal)
-          @logger.warn('received signal', {
-            :signal => signal
-          })
-          stop
-        end
+        @transport.close
+        super
       end
     end
   end

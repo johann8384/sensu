@@ -1,5 +1,5 @@
-require File.dirname(__FILE__) + '/../lib/sensu/client.rb'
 require File.dirname(__FILE__) + '/helpers.rb'
+require 'sensu/client'
 
 describe 'Sensu::Client' do
   include Helpers
@@ -10,20 +10,24 @@ describe 'Sensu::Client' do
 
   it 'can connect to rabbitmq' do
     async_wrapper do
-      @client.setup_rabbitmq
-      async_done
+      @client.setup_transport
+      timer(0.5) do
+        async_done
+      end
     end
   end
 
   it 'can send a keepalive' do
     async_wrapper do
       keepalive_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         @client.publish_keepalive
         queue.subscribe do |payload|
-          keepalive = Oj.load(payload)
-          keepalive[:name].should eq('i-424242')
-          keepalive[:service][:password].should eq('REDACTED')
+          keepalive = MultiJson.load(payload)
+          expect(keepalive[:name]).to eq('i-424242')
+          expect(keepalive[:service][:password]).to eq('REDACTED')
+          expect(keepalive[:version]).to eq(Sensu::VERSION)
+          expect(keepalive[:timestamp]).to be_within(10).of(epoch)
           async_done
         end
       end
@@ -33,11 +37,11 @@ describe 'Sensu::Client' do
   it 'can schedule keepalive publishing' do
     async_wrapper do
       keepalive_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         @client.setup_keepalives
         queue.subscribe do |payload|
-          keepalive = Oj.load(payload)
-          keepalive[:name].should eq('i-424242')
+          keepalive = MultiJson.load(payload)
+          expect(keepalive[:name]).to eq('i-424242')
           async_done
         end
       end
@@ -47,13 +51,13 @@ describe 'Sensu::Client' do
   it 'can send a check result' do
     async_wrapper do
       result_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         check = result_template[:check]
         @client.publish_result(check)
         queue.subscribe do |payload|
-          result = Oj.load(payload)
-          result[:client].should eq('i-424242')
-          result[:check][:name].should eq('foobar')
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(result[:check][:name]).to eq('test')
           async_done
         end
       end
@@ -63,13 +67,13 @@ describe 'Sensu::Client' do
   it 'can execute a check command' do
     async_wrapper do
       result_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         @client.execute_check_command(check_template)
         queue.subscribe do |payload|
-          result = Oj.load(payload)
-          result[:client].should eq('i-424242')
-          result[:check][:output].should eq("WARNING\n")
-          result[:check].should have_key(:executed)
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(result[:check][:output]).to eq("WARNING\n")
+          expect(result[:check]).to have_key(:executed)
           async_done
         end
       end
@@ -79,14 +83,34 @@ describe 'Sensu::Client' do
   it 'can substitute check command tokens with attributes, default values, and execute it' do
     async_wrapper do
       result_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         check = check_template
-        check[:command] = 'echo :::nested.attribute|default::: :::missing|default::: :::missing|:::'
+        command = 'echo :::nested.attribute|default::: :::missing|default:::'
+        command << ' :::missing|::: :::nested.attribute:::::::nested.attribute:::'
+        command << ' :::empty|localhost::: :::empty.hash|localhost:8080:::'
+        check[:command] = command
         @client.execute_check_command(check)
         queue.subscribe do |payload|
-          result = Oj.load(payload)
-          result[:client].should eq('i-424242')
-          result[:check][:output].should eq("true default\n")
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(result[:check][:output]).to eq("true default true:true localhost localhost:8080\n")
+          async_done
+        end
+      end
+    end
+  end
+
+  it 'can substitute check command tokens with attributes and handle unmatched tokens' do
+    async_wrapper do
+      result_queue do |queue|
+        @client.setup_transport
+        check = check_template
+        check[:command] = 'echo :::nonexistent::: :::noexistent.hash::: :::empty.hash:::'
+        @client.execute_check_command(check)
+        queue.subscribe do |payload|
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(result[:check][:output]).to eq("Unmatched command tokens: nonexistent, noexistent.hash, empty.hash")
           async_done
         end
       end
@@ -96,16 +120,16 @@ describe 'Sensu::Client' do
   it 'can run a check extension' do
     async_wrapper do
       result_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         check = {
           :name => 'sensu_gc_metrics'
         }
         @client.run_check_extension(check)
         queue.subscribe do |payload|
-          result = Oj.load(payload)
-          result[:client].should eq('i-424242')
-          result[:check][:output].should start_with('{')
-          result[:check].should have_key(:executed)
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(result[:check][:output]).to start_with('{')
+          expect(result[:check]).to have_key(:executed)
           async_done
         end
       end
@@ -114,12 +138,12 @@ describe 'Sensu::Client' do
 
   it 'can setup subscriptions' do
     async_wrapper do
-      @client.setup_rabbitmq
+      @client.setup_transport
       @client.setup_subscriptions
       timer(1) do
         amq.fanout('test', :passive => true) do |exchange, declare_ok|
-          declare_ok.should be_an_instance_of(AMQ::Protocol::Exchange::DeclareOk)
-          exchange.status.should eq(:opening)
+          expect(declare_ok).to be_an_instance_of(AMQ::Protocol::Exchange::DeclareOk)
+          expect(exchange.status).to eq(:opening)
           async_done
         end
       end
@@ -129,16 +153,16 @@ describe 'Sensu::Client' do
   it 'can receive a check request and execute the check' do
     async_wrapper do
       result_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         @client.setup_subscriptions
         timer(1) do
-          amq.fanout('test').publish(Oj.dump(check_template))
+          amq.fanout('test').publish(MultiJson.dump(check_template))
         end
         queue.subscribe do |payload|
-          result = Oj.load(payload)
-          result[:client].should eq('i-424242')
-          result[:check][:output].should eq("WARNING\n")
-          result[:check][:status].should eq(1)
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(result[:check][:output]).to eq("WARNING\n")
+          expect(result[:check][:status]).to eq(1)
           async_done
         end
       end
@@ -149,16 +173,16 @@ describe 'Sensu::Client' do
     async_wrapper do
       result_queue do |queue|
         @client.safe_mode = true
-        @client.setup_rabbitmq
+        @client.setup_transport
         @client.setup_subscriptions
         timer(1) do
-          amq.fanout('test').publish(Oj.dump(check_template))
+          amq.fanout('test').publish(MultiJson.dump(check_template))
         end
         queue.subscribe do |payload|
-          result = Oj.load(payload)
-          result[:client].should eq('i-424242')
-          result[:check][:output].should include('safe mode')
-          result[:check][:status].should eq(3)
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(result[:check][:output]).to include('safe mode')
+          expect(result[:check][:status]).to eq(3)
           async_done
         end
       end
@@ -168,16 +192,16 @@ describe 'Sensu::Client' do
   it 'can schedule standalone check execution' do
     async_wrapper do
       result_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         @client.setup_standalone
         expected = ['standalone', 'sensu_gc_metrics']
         queue.subscribe do |payload|
-          result = Oj.load(payload)
-          result[:client].should eq('i-424242')
-          result[:check].should have_key(:issued)
-          result[:check].should have_key(:output)
-          result[:check].should have_key(:status)
-          expected.delete(result[:check][:name]).should_not be_nil
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(result[:check]).to have_key(:issued)
+          expect(result[:check]).to have_key(:output)
+          expect(result[:check]).to have_key(:status)
+          expect(expected.delete(result[:check][:name])).not_to be_nil
           if expected.empty?
             async_done
           end
@@ -189,7 +213,7 @@ describe 'Sensu::Client' do
   it 'can accept external result input via sockets' do
     async_wrapper do
       result_queue do |queue|
-        @client.setup_rabbitmq
+        @client.setup_transport
         @client.setup_sockets
         timer(1) do
           EM::connect('127.0.0.1', 3030, nil) do |socket|
@@ -204,9 +228,9 @@ describe 'Sensu::Client' do
         end
         expected = ['tcp', 'udp']
         queue.subscribe do |payload|
-          result = Oj.load(payload)
-          result[:client].should eq('i-424242')
-          expected.delete(result[:check][:name]).should_not be_nil
+          result = MultiJson.load(payload)
+          expect(result[:client]).to eq('i-424242')
+          expect(expected.delete(result[:check][:name])).not_to be_nil
           if expected.empty?
             async_done
           end
