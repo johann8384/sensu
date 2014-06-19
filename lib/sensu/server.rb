@@ -470,6 +470,11 @@ module Sensu
                     :output => check[:output],
                     :status => check[:status],
                     :issued => check[:issued],
+                    :check_parameters => {
+                      :refresh => check[:refresh] ? check[:refresh] : nil,
+                      :occurrences => check[:occurrences] ? check[:occurrences] : nil,
+                      :dependencies => check[:dependencies] ? check[:dependencies] : nil
+                    },
                     :handlers => Array((check[:handlers] || check[:handler]) || 'default'),
                     :flapping => is_flapping,
                     :occurrences => event[:occurrences]
